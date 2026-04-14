@@ -429,7 +429,18 @@
             comp["repr"] = "stick"
             repr = {}
             repr[comp["repr"]] = {}
+            if (comp["repr"] === "stick") {
+              repr[comp["repr"]] = {radius: 0.1};
+            }
             viewer.addStyle(sel, repr);
+            // Show H on interacting protein residues as white sticks.
+            // icode excluded: LUNA stores it as " " (space), not ""; this space fails to
+            // match atoms in 3Dmol which uses empty string internally, selecting zero atoms.
+            // Ligand compounds (chain "z") are skipped; ligand H handled by mol_model.setStyle above.
+            if (comp["chain"] !== "z") {
+              viewer.addStyle({chain: comp["chain"], resn: comp["name"], resi: comp["number"], elem: "H"},
+                              {stick:{radius:0.12, color:"white"}});
+            }
           }
 
 
@@ -445,7 +456,15 @@
 
             repr = {}
             repr[comp["repr"]] = {}
+            if (comp["repr"] === "stick") {
+              repr[comp["repr"]] = {radius: 0.1};
+            }
             viewer.addStyle(sel, repr);
+            // Show H on interacting protein residues as white sticks (skip ligand chain "z")
+            if (comp["chain"] !== "z") {
+              viewer.addStyle({chain: comp["chain"], resn: comp["name"], resi: comp["number"], elem: "H"},
+                              {stick:{radius:0.12, color:"white"}});
+            }
           }
 
           trgt_coords = trgt_grp["centroid"]
@@ -480,7 +499,7 @@
     //adds pdb to viewer
     function create_viewer(){    
       var viewer = $3Dmol.viewers['container-01'];
-      var prot_model = viewer.addModel(`{{pdb_file}}`, "pdb");
+      var prot_model = viewer.addModel(`{{pdb_file}}`, "pdb", {keepH: true});
    };
 
    function recenter_viewer(){
@@ -511,10 +530,24 @@
       //clear cartoon residues
       prot_model = viewer.getModel(0);
       prot_model.setStyle({},{line:{}});
+      // Hide all protein hydrogens in the baseline wire view.
+      // Nearby/interacting residue hydrogens are added back explicitly in PEPDESIGN.set_interactions.
+      prot_model.setStyle({elem:"H"}, {});
+
+      // Render structural waters as sticks (O+H) with cpk coloring.
+      // add=true overrides the H-hiding rule above for water residues,
+      // making H01/H02 visible alongside the oxygen.
+      var water_resn = ["HOH", "WAT", "H2O", "OH2", "DOD"];
+      for (var wi = 0; wi < water_resn.length; wi++) {
+        var wname = water_resn[wi];
+        prot_model.setStyle({resn: wname}, {stick:{radius:0.15, colorscheme:"cpk", opacity:0.9}}, true);
+      }
 
       // replace with new mol and inters
       var mol_model = viewer.addModel(mol, "sdf");
       mol_model.setStyle({},{stick:{colorscheme:"magentaCarbon"}});
+      // add H as white sticks on top of heavy-atom sticks (add=true preserves other styles)
+      mol_model.setStyle({elem:"H"},{stick:{radius:0.12,color:"white"}},true);
 
       var js_inters = JSON.parse(inters)
       PEPDESIGN.set_interactions(viewer, prot_model, mol_model, js_inters);
@@ -833,11 +866,18 @@
 
             if (show_first) { swap_mol(data['molecules'][0]['id'], recenter); }
           } else {
-            //something went wrong - likely that there were no predictions to work off of
+            // no molecules for current filters/mode
             if (sessionStorage.getItem("name").length > 0){
               alert("No molecules found matching requested name.");
             } else {
-              alert("No molecules found - did you forget to train a model?");
+              if (sessionStorage.getItem("mode") === "annotate") {
+                alert("All molecules in annotation mode are already rated. Switching to review mode.");
+                mode.value = "review";
+                swap_mode("review");
+                return;
+              } else {
+                alert("No molecules found for current review filters.");
+              }
             }
             swap_method('score');
           }

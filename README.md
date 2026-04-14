@@ -4,6 +4,30 @@
 
 Autoparty is a Python-based application developed to assist scientists in analyzing the results of virtual docking screens using active deep learning. The user can upload the protein target and docked ligands to visualize their structure and relevant intermolecular interactions. These molecules can then be graded by the user and saved to a database to maintain a robust record of structures and human annotations. During human-in-the-loop training, a machine learning model is trained to both predict these annotations for new molecules and to determine which molecules are the most informative for the user to see, after which the model predictions can be exported for further review. We hope that this tool will bring together recent ML advancements and medicinal chemical expertise, facilitating easier pose evaluation and potentially allowing for the recovery of false negatives further down in the screening hit list.
 
+## Fork Notice
+
+This repository is a fork/customized working copy of the original Autoparty project from the Keiser Lab.
+
+The main functional changes in this fork include:
+
+- Hydrogen preservation in ligand ingestion and processing:
+  - Explicit hydrogens are retained during SDF and MolBlock loading (`removeHs=False`) and restored for legacy molecules when needed.
+- Viewer-level hydrogen rendering improvements:
+  - Protein PDB parsing in 3Dmol now keeps hydrogens.
+  - Ligand hydrogens are rendered as white sticks.
+  - Nearby/interacting residue hydrogens are shown, while distant baseline protein hydrogens are hidden for clarity.
+- Structural water rendering updates:
+  - Waters are rendered as sticks (including water hydrogens when present) instead of oxygen-only spheres.
+- Water-mediated interaction defaults:
+  - LUNA defaults were updated to allow water participation in interaction calculations.
+- Config loading reliability fix:
+  - Default config paths are resolved with an absolute project path so worker/web process working-directory differences do not silently load wrong defaults.
+- UX/robustness fixes:
+  - Improved handling when annotation mode is exhausted (auto-switch to review mode).
+  - Better failure surfacing for background interaction-calculation tasks.
+
+See [RUN_DEBUG_GUIDE.md](RUN_DEBUG_GUIDE.md) for environment setup, troubleshooting, and validation steps for these fork-specific behaviors.
+
 
 ---
 

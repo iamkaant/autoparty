@@ -80,14 +80,17 @@ def load_remote_molecules(file_path, score_label):
 	if 'sdf' in file_extension:
 		if 'gz' in file_extension:
 			with gzip.open(file_path) as gzf:
-				supl = Chem.ForwardSDMolSupplier(gzf)
+				supl = Chem.ForwardSDMolSupplier(gzf, removeHs=False)
 				mols = [x for x in supl if x is not None]
 		else:
-			supl = Chem.ForwardSDMolSupplier(file_path) 
+			supl = Chem.ForwardSDMolSupplier(file_path, removeHs=False) 
 			mols = [x for x in supl if x is not None]
 
 	for mol in mols:
 		try:
+			# Ensure explicit H atoms are preserved for downstream 3D visualization.
+			if mol.GetNumAtoms() == mol.GetNumHeavyAtoms():
+				mol = Chem.AddHs(mol, addCoords=True)
 			mollist.append((mol.GetProp("_Name"), Chem.MolToMolBlock(mol), mol.GetProp(score_label)))
 		except:
 			fail_load += 1

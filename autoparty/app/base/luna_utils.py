@@ -22,8 +22,14 @@ from luna.interaction.filter import InteractionFilter, BindingModeFilter
 from luna.interaction.fp.shell import ShellGenerator
 from luna.interaction.fp.type import IFPType
 from luna.util.default_values import *
-from luna.MyBio.util import get_entity_from_entry
-from luna.MyBio.PDB.PDBParser import PDBParser
+try:
+    # Newer LUNA versions moved MyBio utilities under luna.pdb.*
+    from luna.pdb.util.traverse import get_entity_from_entry
+    from luna.pdb.parser.base import PDBParser
+except ImportError:
+    # Backward compatibility for older LUNA layouts.
+    from luna.MyBio.util import get_entity_from_entry
+    from luna.MyBio.PDB.PDBParser import PDBParser
 
 from luna.util import rgb2hex
 
@@ -35,6 +41,23 @@ IFP_TYPES = {
     "FIFP": IFPType.FIFP,
     "HIFP": IFPType.HIFP,
 }
+
+
+def _mark_as_target(entity):
+    if hasattr(entity, "set_as_target"):
+        entity.set_as_target(is_target=True)
+    elif hasattr(entity, "set_as_reference"):
+        entity.set_as_reference(is_reference=True)
+    else:
+        raise AttributeError("LUNA entity does not support target/reference marking.")
+
+
+def _is_target(entity):
+    if hasattr(entity, "is_target"):
+        return entity.is_target()
+    if hasattr(entity, "is_reference"):
+        return entity.is_reference()
+    return False
 
 def run_mol_batch(prot_id, zids, loaded_mols, protein, 
     luna_config_paths = {}, celery_task = None):
@@ -96,7 +119,7 @@ def run_mol(prot_id, zid, loaded_mol, protein,
     structure = entry.get_biopython_structure(structure, pdb_parser)
     
     ligand = get_entity_from_entry(structure, entry)
-    ligand.set_as_target(is_target = True)
+    _mark_as_target(ligand)
 
     atm_grps_mngr = perceive_chemical_groups(entry, structure[0], 
                                                 ligand, params, 
@@ -194,7 +217,7 @@ def cache_protein_properties(entry, pdb_id, protein, params):
     add_hydrogen = decide_hydrogen_addition(True, pdb_parser.get_header(), entry)
     
     ligand = get_entity_from_entry(structure, entry)
-    ligand.set_as_target(is_target = True)
+    _mark_as_target(ligand)
 
     radius = params['inter_calc'].inter_config.get("cache_cutoff",
                                   BOUNDARY_CONFIG["cache_cutoff"])
@@ -202,7 +225,7 @@ def cache_protein_properties(entry, pdb_id, protein, params):
     nb_pairs = get_contacts_with(structure[0], ligand,
                                      level='R', radius=radius)
     nb_compounds = set([p[0] for p in nb_pairs
-                            if not p[0].is_target()])
+                            if not _is_target(p[0])])
 
     mol_objs_dict = {}
     if isinstance(entry, MolFileEntry):
@@ -214,7 +237,7 @@ def cache_protein_properties(entry, pdb_id, protein, params):
 
     valid_edges = set()
     for edge in atm_grps_mngr.graph.edges:
-        if any([atm.parent.is_target() for atm in edge]) is False:
+        if any([_is_target(atm.parent) for atm in edge]) is False:
             valid_edges.add(edge)
     atm_grps_mngr.graph = nx.Graph()
     atm_grps_mngr.graph.add_edges_from(valid_edges)

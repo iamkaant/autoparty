@@ -698,6 +698,15 @@ def get_mol():
         #
 
     next_mol = Molecule.serialize(next_mol)
+    # Backward compatibility: older screens may store mol blocks with implicit-only H.
+    # Add explicit H with coordinates for visualization in the 3D viewer.
+    try:
+        rdkit_mol = Chem.MolFromMolBlock(next_mol['mol'], removeHs=False)
+        if rdkit_mol is not None and rdkit_mol.GetNumAtoms() == rdkit_mol.GetNumHeavyAtoms():
+            rdkit_mol = Chem.AddHs(rdkit_mol, addCoords=True)
+            next_mol['mol'] = Chem.MolToMolBlock(rdkit_mol)
+    except Exception:
+        pass
     if next_pred:
         next_pred = Prediction.serialize(next_pred)
     if next_grade:

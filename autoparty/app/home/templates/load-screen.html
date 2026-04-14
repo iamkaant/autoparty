@@ -145,10 +145,14 @@ function update_progress(status_url, nanobar, pb_div){
 
     if (data['finished']){
         pb_div.style.display = "none";
-        // we're done, delete task
-        $.getJSON(status_url + "&delete_id=1", function(data){
-            alert("Calculations finished.")
-        })
+        if (data['failed']) {
+            alert("Calculations failed. Check the Celery worker output for the underlying error.")
+        } else {
+            // we're done, delete task
+            $.getJSON(status_url + "&delete_id=1", function(data){
+                alert("Calculations finished.")
+            })
+        }
     } else {
         setTimeout(function() {
         update_progress(status_url, nanobar, pb_div);}, 500);

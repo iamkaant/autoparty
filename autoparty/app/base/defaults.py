@@ -1,7 +1,9 @@
+import os
+
 ###config values for file uploads
 INPUTS_FOLDER = 'inputs'
 UPLOAD_FOLDER = 'outputs'
-DEFAULT_FOLDER = 'defaults'
+DEFAULT_FOLDER = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'defaults'))
 DEFAULT_PARTY_CONFIG = f'{DEFAULT_FOLDER}/party_default.conf'
 MOL_BATCH_SIZE = 50 # batch size for interaction calculations
 MOL_PAGE_SIZE = 12 # how many molecules to dispay per page

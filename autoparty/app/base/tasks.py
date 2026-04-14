@@ -117,7 +117,7 @@ def task_calculate_interactions(self, mol_names, mol_strs, scores, run_id, runna
             meta = {'complete': 0, 'total':len(mol_names)})
 
         luna_config = json.loads(luna_config)
-        mols = [Chem.MolFromMolBlock(mol) for mol in mol_strs]
+        mols = [Chem.MolFromMolBlock(mol, removeHs=False) for mol in mol_strs]
 
         #cache protein features
         cache, params = get_protein_cache(runname, mol_names[0], mols[0], pdb_file)
@@ -132,8 +132,8 @@ def task_calculate_interactions(self, mol_names, mol_strs, scores, run_id, runna
 
         return {'complete': j+1, 'total':len(mol_names)} 
     except Exception as e:
-        logger.INFO(f"TASK FAILED: {e}")
-        return {'processed':False, '':e}
+        logger.exception("Interaction calculation task failed")
+        raise
 
 def task_save_grade_helper(mol_id, grade, run_id, user_id, party_id, 
     metacols = None, metavals = None, build_ifp = True, dummy_ifp = None):
