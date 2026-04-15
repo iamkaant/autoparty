@@ -34,6 +34,8 @@ from celery.signals import task_postrun
 from celery.utils.log import get_task_logger
 
 import rdkit.Chem as Chem
+from rdkit.Chem import ChemicalFeatures
+from rdkit import RDConfig
 
 import torch
 from torch import nn
@@ -44,6 +46,172 @@ import shutil
 import pickle
 
 logger = get_task_logger(__name__)
+
+_HBOND_FEATURE_FACTORY = None
+
+
+def _get_hbond_feature_factory():
+    global _HBOND_FEATURE_FACTORY
+    if _HBOND_FEATURE_FACTORY is None:
+        _HBOND_FEATURE_FACTORY = ChemicalFeatures.BuildFeatureFactory(
+            os.path.join(RDConfig.RDDataDir, 'BaseFeatures.fdef')
+        )
+    return _HBOND_FEATURE_FACTORY
+
+
+def _parse_structural_waters(pdb_file):
+    waters = {}
+    with open(pdb_file, 'r') as handle:
+        for line in handle:
+            if not line.startswith(('ATOM', 'HETATM')):
+                continue
+            resn = line[17:20].strip()
+            if resn not in {'HOH', 'WAT', 'H2O', 'OH2', 'DOD'}:
+                continue
+            chain = line[21].strip() or ' '
+            resi = int(line[22:26])
+            atom_name = line[12:16].strip()
+            coord = np.array([
+                float(line[30:38]),
+                float(line[38:46]),
+                float(line[46:54]),
+            ], dtype=float)
+            key = (chain, resn, resi)
+            waters.setdefault(key, {'chain': chain, 'resn': resn, 'resi': resi, 'O': None, 'Hs': []})
+            if atom_name == 'O':
+                waters[key]['O'] = coord
+            elif atom_name.startswith('H'):
+                waters[key]['Hs'].append((atom_name, coord))
+    return [w for w in waters.values() if w['O'] is not None]
+
+
+def _angle_degrees(point_a, point_b, point_c):
+    vec_ba = point_a - point_b
+    vec_bc = point_c - point_b
+    norm_ba = np.linalg.norm(vec_ba)
+    norm_bc = np.linalg.norm(vec_bc)
+    if norm_ba == 0 or norm_bc == 0:
+        return 0.0
+    cosine = np.dot(vec_ba, vec_bc) / (norm_ba * norm_bc)
+    cosine = np.clip(cosine, -1.0, 1.0)
+    return float(np.degrees(np.arccos(cosine)))
+
+
+def _ligand_group_json(mol, atom_ids, feature_name):
+    conf = mol.GetConformer()
+    coords = []
+    atoms = []
+    for atom_idx in atom_ids:
+        atom = mol.GetAtomWithIdx(atom_idx)
+        pos = conf.GetAtomPosition(atom_idx)
+        coords.append(np.array([pos.x, pos.y, pos.z], dtype=float))
+        atoms.append({
+            'pdb_id': 'LIG',
+            'model': 0,
+            'chain': 'z',
+            'resname': 'LIG',
+            'resid': ['H_LIG', 9999, ' '],
+            'name': [f"{atom.GetSymbol()}{atom_idx + 1}", ' '],
+        })
+    centroid = np.mean(coords, axis=0)
+    return {
+        'atoms': atoms,
+        'compounds': [{'chain': 'z', 'name': 'LIG', 'number': 9999, 'icode': ' ', 'repr': 'stick'}],
+        'features': [feature_name],
+        'classes': ['Hetatm'],
+        'add_pseudo_group': False,
+        'centroid': centroid.tolist(),
+        'show_centroid': True,
+    }
+
+
+def _water_group_json(water, feature_name):
+    return {
+        'atoms': [{
+            'pdb_id': 'PROT',
+            'model': 0,
+            'chain': water['chain'],
+            'resname': water['resn'],
+            'resid': [' ', water['resi'], ' '],
+            'name': ['O', ' '],
+        }],
+        'compounds': [{'chain': water['chain'], 'name': water['resn'], 'number': water['resi'], 'icode': ' ', 'repr': 'stick'}],
+        'features': [feature_name],
+        'classes': ['Residue'],
+        'add_pseudo_group': False,
+        'centroid': water['O'].tolist(),
+        'show_centroid': True,
+    }
+
+
+def _detect_ligand_water_hbonds(mol, structural_waters):
+    feature_factory = _get_hbond_feature_factory()
+    conf = mol.GetConformer()
+    interactions = []
+    seen = set()
+
+    for feat in feature_factory.GetFeaturesForMol(mol):
+        feature_name = feat.GetFamily()
+        atom_ids = tuple(feat.GetAtomIds())
+
+        if feature_name == 'Donor':
+            donor_atoms = [atom_idx for atom_idx in atom_ids if mol.GetAtomWithIdx(atom_idx).GetAtomicNum() != 1]
+            for donor_idx in donor_atoms:
+                donor_atom = mol.GetAtomWithIdx(donor_idx)
+                donor_pos = conf.GetAtomPosition(donor_idx)
+                donor_coord = np.array([donor_pos.x, donor_pos.y, donor_pos.z], dtype=float)
+                for neighbor in donor_atom.GetNeighbors():
+                    if neighbor.GetAtomicNum() != 1:
+                        continue
+                    h_idx = neighbor.GetIdx()
+                    h_pos = conf.GetAtomPosition(h_idx)
+                    h_coord = np.array([h_pos.x, h_pos.y, h_pos.z], dtype=float)
+                    for water in structural_waters:
+                        heavy_dist = np.linalg.norm(donor_coord - water['O'])
+                        h_dist = np.linalg.norm(h_coord - water['O'])
+                        angle = _angle_degrees(donor_coord, h_coord, water['O'])
+                        if heavy_dist <= 3.6 and h_dist <= 2.6 and angle >= 100.0:
+                            key = ('donor', donor_idx, water['chain'], water['resi'])
+                            if key in seen:
+                                continue
+                            seen.add(key)
+                            interactions.append({
+                                'type': 'Hydrogen bond',
+                                'is_directional': True,
+                                'is_intramol_interaction': False,
+                                'is_intermol_interaction': True,
+                                'color': '#4c4cff',
+                                'src_grp': _ligand_group_json(mol, atom_ids, 'Donor'),
+                                'trgt_grp': _water_group_json(water, 'Acceptor'),
+                            })
+
+        elif feature_name == 'Acceptor':
+            acceptor_coords = []
+            for atom_idx in atom_ids:
+                pos = conf.GetAtomPosition(atom_idx)
+                acceptor_coords.append(np.array([pos.x, pos.y, pos.z], dtype=float))
+            acceptor_centroid = np.mean(acceptor_coords, axis=0)
+            for water in structural_waters:
+                for _, h_coord in water['Hs']:
+                    heavy_dist = np.linalg.norm(acceptor_centroid - water['O'])
+                    h_dist = np.linalg.norm(acceptor_centroid - h_coord)
+                    angle = _angle_degrees(water['O'], h_coord, acceptor_centroid)
+                    if heavy_dist <= 3.6 and h_dist <= 2.6 and angle >= 100.0:
+                        key = ('acceptor', atom_ids, water['chain'], water['resi'])
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        interactions.append({
+                            'type': 'Hydrogen bond',
+                            'is_directional': True,
+                            'is_intramol_interaction': False,
+                            'is_intermol_interaction': True,
+                            'color': '#4c4cff',
+                            'src_grp': _water_group_json(water, 'Donor'),
+                            'trgt_grp': _ligand_group_json(mol, atom_ids, 'Acceptor'),
+                        })
+
+    return interactions
 
 # Not celery task, but I'm putting here since it's used by celery tasks and it avoids circular dependencies
 # Should probably go in molecules or a db_utils file technically, might move. 
@@ -119,14 +287,17 @@ def task_calculate_interactions(self, mol_names, mol_strs, scores, run_id, runna
         luna_config = json.loads(luna_config)
         mols = [Chem.MolFromMolBlock(mol, removeHs=False) for mol in mol_strs]
 
+        structural_waters = _parse_structural_waters(pdb_file)
+
         #cache protein features
-        cache, params = get_protein_cache(runname, mol_names[0], mols[0], pdb_file)
+        cache, params = get_protein_cache(runname, mol_names[0], mols[0], pdb_file, luna_config)
 
         for j, (mol_name, mol, score) in enumerate(zip(mol_names, mols, scores)):
             ifp, inter = run_mol(runname, mol_name, mol, pdb_file, 
                                                             params = params,
                                                             cache = cache)
             inter_jsons = [i.as_json() for i in inter.interactions]
+            inter_jsons.extend(_detect_ligand_water_hbonds(mol, structural_waters))
             save_molecule(mol_name, run_id, mol, score, inter_jsons, ifp)
             self.update_state(state = "PROGRESS", meta = {"complete": j+1, "total": len(mols)})
 

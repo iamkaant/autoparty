@@ -169,6 +169,20 @@ def parse_luna_config(luna_config_paths):
     if 'LUNA_config' in luna_config_paths:
         luna_config_parser.read(luna_config_paths['LUNA_config'])
 
+    # This fork relies on structural waters participating in interaction analysis.
+    # Force the relevant settings here so worker/runtime config drift or uploaded
+    # overrides cannot silently disable water-mediated hydrogen bonds.
+    if not luna_config_parser.has_section('interactions'):
+        luna_config_parser.add_section('interactions')
+    luna_config_parser.set('interactions', 'add_h2o_pairs_with_no_target', 'True')
+    luna_config_parser.set('interactions', 'add_dependent_inter', 'True')
+
+    lazy_comps = []
+    if luna_config_parser.has_option('interactions', 'lazy_comps_list'):
+        lazy_comps = [x.strip() for x in luna_config_parser.get('interactions', 'lazy_comps_list').split(',') if x.strip()]
+    lazy_comps = [x for x in lazy_comps if x not in {'HOH', 'DOD', 'WAT', 'H2O', 'OH2'}]
+    luna_config_parser.set('interactions', 'lazy_comps_list', ','.join(lazy_comps))
+
     for section in luna_config_parser.sections():
         luna_config_dict.update(luna_config_parser.items(section))
     

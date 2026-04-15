@@ -27,6 +27,7 @@ orderby_dict = {"score": [Molecule.score], "uncertainty": [desc(Prediction.uncer
 LUNA_IFP_LENGTH = 4096
 LIGAND_MORGAN_BITS = 2048
 LIGAND_DESC_LEN = 10
+HBOND_INTERACTION_TYPES = {"Hydrogen bond", "Weak hydrogen bond", "Water-bridged hydrogen bond"}
 
 _FEATURE_FACTORY = None
 
@@ -39,44 +40,82 @@ def _get_feature_factory():
 	return _FEATURE_FACTORY
 
 
-def _count_stranded_hbond_sites(mol):
-	"""Approximate stranded H-bond sites by graph proximity.
-
-	A donor (or acceptor) is counted as stranded if no complementary
-	acceptor (or donor) atom exists within <= 3 topological bonds.
-	"""
+def _get_ligand_hbond_feature_counts(mol):
+	"""Count ligand donor/acceptor feature groups using RDKit feature definitions."""
 	factory = _get_feature_factory()
 	feats = factory.GetFeaturesForMol(mol)
 
-	donors = set()
-	acceptors = set()
+	donor_count = 0
+	acceptor_count = 0
 	for feat in feats:
 		family = feat.GetFamily()
-		atoms = feat.GetAtomIds()
 		if family == "Donor":
-			donors.update(atoms)
+			donor_count += 1
 		elif family == "Acceptor":
-			acceptors.update(atoms)
+			acceptor_count += 1
 
-	if len(donors) == 0 or len(acceptors) == 0:
-		return len(donors), len(acceptors)
-
-	dmat = Chem.GetDistanceMatrix(mol)
-
-	stranded_donors = 0
-	for d in donors:
-		if not any(dmat[d, a] <= 3 for a in acceptors):
-			stranded_donors += 1
-
-	stranded_acceptors = 0
-	for a in acceptors:
-		if not any(dmat[a, d] <= 3 for d in donors):
-			stranded_acceptors += 1
-
-	return stranded_donors, stranded_acceptors
+	return donor_count, acceptor_count
 
 
-def _ligand_feature_vector(smiles):
+def _normalize_inters(inters):
+	if inters is None:
+		return []
+	if isinstance(inters, str):
+		try:
+			inters = json.loads(inters)
+		except Exception:
+			return []
+	if isinstance(inters, str):
+		try:
+			inters = json.loads(inters)
+		except Exception:
+			return []
+	return inters if isinstance(inters, list) else []
+
+
+def _ligand_group_key(group):
+	centroid = group.get('centroid', [])
+	if len(centroid) == 3:
+		return (round(float(centroid[0]), 3), round(float(centroid[1]), 3), round(float(centroid[2]), 3))
+
+	atom_names = []
+	for atom in group.get('atoms', []):
+		name = atom.get('name')
+		if isinstance(name, list) and len(name) > 0:
+			atom_names.append(str(name[0]).strip())
+		elif isinstance(name, str):
+			atom_names.append(name.strip())
+	if len(atom_names) == 0:
+		return None
+	return tuple(sorted(atom_names))
+
+
+def _count_ligand_hbond_features_involved(inters):
+	"""Count unique ligand donor/acceptor feature groups participating in H-bonds."""
+	inters = _normalize_inters(inters)
+	involved_donors = set()
+	involved_acceptors = set()
+
+	for inter in inters:
+		if inter.get('type') not in HBOND_INTERACTION_TYPES:
+			continue
+		for grp in (inter.get('src_grp', {}), inter.get('trgt_grp', {})):
+			compounds = grp.get('compounds', [])
+			if not any(comp.get('chain') == 'z' for comp in compounds):
+				continue
+			group_key = _ligand_group_key(grp)
+			if group_key is None:
+				continue
+			features = set(grp.get('features', []))
+			if 'Donor' in features or 'WeakDonor' in features:
+				involved_donors.add(group_key)
+			if 'Acceptor' in features:
+				involved_acceptors.add(group_key)
+
+	return len(involved_donors), len(involved_acceptors)
+
+
+def _ligand_feature_vector(smiles, inters=None):
 	"""Ligand-only structural features for moieties and H-bond tendencies."""
 	mol = Chem.MolFromSmiles(smiles) if smiles else None
 	if mol is None:
@@ -89,9 +128,10 @@ def _ligand_feature_vector(smiles):
 		useFeatures=True
 	), dtype=np.float32)
 
-	num_hbd = float(Lipinski.NumHDonors(mol))
-	num_hba = float(Lipinski.NumHAcceptors(mol))
-	stranded_d, stranded_a = _count_stranded_hbond_sites(mol)
+	num_hbd, num_hba = _get_ligand_hbond_feature_counts(mol)
+	involved_d, involved_a = _count_ligand_hbond_features_involved(inters)
+	stranded_d = max(0.0, float(num_hbd) - float(involved_d))
+	stranded_a = max(0.0, float(num_hba) - float(involved_a))
 
 	desc = np.array([
 		float(len([a for a in mol.GetAtoms() if a.GetAtomicNum() == 35])),  # bromine count
@@ -99,8 +139,8 @@ def _ligand_feature_vector(smiles):
 		float(len([a for a in mol.GetAtoms() if a.GetAtomicNum() == 53])),  # iodine count
 		float(rdMolDescriptors.CalcNumSaturatedRings(mol)),
 		float(rdMolDescriptors.CalcNumAromaticRings(mol)),
-		num_hbd,
-		num_hba,
+		float(num_hbd),
+		float(num_hba),
 		float(stranded_d),
 		float(stranded_a),
 		float(rdMolDescriptors.CalcFractionCSP3(mol)),
@@ -109,9 +149,9 @@ def _ligand_feature_vector(smiles):
 	return np.concatenate((morgan, desc), axis=0)
 
 
-def _combine_ifp_and_ligand_features(ifp_json, smiles, ifp_length=LUNA_IFP_LENGTH):
+def _combine_ifp_and_ligand_features(ifp_json, smiles, inters=None, ifp_length=LUNA_IFP_LENGTH):
 	ifp = _unpack_fp(ifp_json, fp_length=ifp_length)
-	lig = _ligand_feature_vector(smiles)
+	lig = _ligand_feature_vector(smiles, inters=inters)
 	return np.concatenate((ifp, lig), axis=0)
 
 # no reason for these to be tasks really, they're synchronous
@@ -236,7 +276,7 @@ def get_grades_for_training(party_id, format_dataframe = True, fp_col = 'fp', la
 		data = [
 			(
 				int(grade.mol_id),
-				_combine_ifp_and_ligand_features(json.loads(grade.ifp), grade.molecule.smi, fp_length),
+				_combine_ifp_and_ligand_features(json.loads(grade.ifp), grade.molecule.smi, grade.molecule.inters, fp_length),
 				grade.grade,
 			)
 			for grade in grades
@@ -253,7 +293,7 @@ def get_molecules_for_predicting(mol_ids, format_dataframe = True, fp_col = "fp"
 		data = [
 			(
 				int(mol.id),
-				_combine_ifp_and_ligand_features(mol.ifp.counts, mol.smi),
+				_combine_ifp_and_ligand_features(mol.ifp.counts, mol.smi, mol.inters),
 			)
 			for mol in molecules if mol.ifp is not None
 		] # filter out mols with no ifp if present
