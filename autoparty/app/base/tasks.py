@@ -183,11 +183,14 @@ def task_train_model(self, run_id, user_id, hp_settings_id, run_val = True, np_s
         party_config, errors = parse_party_config(dry_run = True)# load default settings
         party_config.update(json.loads(HPRunSetting.query.get(hp_settings_id).party_config))
 
+        grade_df = get_grades_for_training(hp_settings_id)
+        if grade_df.shape[0] == 0:
+            return {"success": False, "error": "No graded molecules found for training."}
+        party_config['input_size'] = int(grade_df['fp'].iloc[0].shape[0])
+
         logger.info(party_config)
         dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model = get_model(party_config, dev = dev)
-
-        grade_df = get_grades_for_training(hp_settings_id)
         
         training_all = []
         validation_all = []
@@ -286,13 +289,18 @@ def task_predict_molecules(self, mol_ids, run_id, user_id, hp_settings_id, train
     model_filename = "-".join([f"{val_id}{val}"for val_id, val in zip(['u', 's', 'p'], [user_id, run_id, hp_settings_id])]) + \
             f"_{train_task_id}" 
     
+    # get molecules by id
+    molecule_df = get_molecules_for_predicting(mol_ids)
+    if molecule_df.shape[0] == 0:
+        return {'complete': 0, 'total': len(mol_ids)}
+    predict_ids = [int(idx) for idx in molecule_df.index]
+    self.update_state(state="PROGRESS", meta = {'complete': 0, 'total': len(predict_ids)})
+    party_config['input_size'] = int(molecule_df['fp'].iloc[0].shape[0])
+
     dev = 'cpu' #torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = get_model(party_config)
     model.load_from_state(f"{UPLOAD_FOLDER}/{model_filename}")
-
-    # get molecules by id
-    molecule_df = get_molecules_for_predicting(mol_ids)
-    predictloader = model.create_dataloaders(molecule_df, predict = True, batch_size = len(mol_ids))
+    predictloader = model.create_dataloaders(molecule_df, predict = True, batch_size = len(predict_ids))
 
     preds, uncerts = model.predict(next(iter(predictloader)).to(dev))
 
@@ -301,7 +309,7 @@ def task_predict_molecules(self, mol_ids, run_id, user_id, hp_settings_id, train
     # get actual grades to calculate error
     grade_df = get_grades_for_training(hp_settings_id)
 
-    for i, (mol_id, pred, uncert) in enumerate(zip(mol_ids, preds, uncerts)):
+    for i, (mol_id, pred, uncert) in enumerate(zip(predict_ids, preds, uncerts)):
 
         try:
             grade = grade_df.at[mol_id, "label"]
@@ -335,7 +343,7 @@ def task_predict_molecules(self, mol_ids, run_id, user_id, hp_settings_id, train
                     ).update({Prediction.prediction: pred, Prediction.uncertainty: uncert, Prediction.error: error})
 
             self.update_state(state="PROGRESS",
-                      meta = {'complete':i + 1, 'total':len(mol_ids)})
+                      meta = {'complete':i + 1, 'total':len(predict_ids)})
 
         except: # prediction doesn't exist yet, make a new one
             pass
@@ -344,7 +352,7 @@ def task_predict_molecules(self, mol_ids, run_id, user_id, hp_settings_id, train
         db.session.commit() # wait until all are updated, otherwise this leads to rapid reordering for the user
     except:
         db.session.rollback()
-    return {'complete':i + 1, 'total':len(mol_ids)}
+    return {'complete':i + 1, 'total':len(predict_ids)}
 
 @task_postrun.connect
 def close_session(*args, **kwargs):

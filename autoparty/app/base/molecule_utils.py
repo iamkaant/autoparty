@@ -8,6 +8,9 @@ import datetime
 
 import json
 import numpy as np
+import rdkit.Chem as Chem
+from rdkit.Chem import AllChem, Lipinski, rdMolDescriptors, ChemicalFeatures
+from rdkit import RDConfig
 
 from sqlalchemy import desc, and_, or_, func
 from sqlalchemy.sql import exists, false
@@ -20,6 +23,96 @@ from app.base.defaults import *
 orderby_dict = {"score": [Molecule.score], "uncertainty": [desc(Prediction.uncertainty)], 
 				"prediction": [Prediction.prediction, Prediction.uncertainty], 
 				"disagreement": [desc(Prediction.error)]}
+
+LUNA_IFP_LENGTH = 4096
+LIGAND_MORGAN_BITS = 2048
+LIGAND_DESC_LEN = 10
+
+_FEATURE_FACTORY = None
+
+
+def _get_feature_factory():
+	global _FEATURE_FACTORY
+	if _FEATURE_FACTORY is None:
+		fdef = os.path.join(RDConfig.RDDataDir, "BaseFeatures.fdef")
+		_FEATURE_FACTORY = ChemicalFeatures.BuildFeatureFactory(fdef)
+	return _FEATURE_FACTORY
+
+
+def _count_stranded_hbond_sites(mol):
+	"""Approximate stranded H-bond sites by graph proximity.
+
+	A donor (or acceptor) is counted as stranded if no complementary
+	acceptor (or donor) atom exists within <= 3 topological bonds.
+	"""
+	factory = _get_feature_factory()
+	feats = factory.GetFeaturesForMol(mol)
+
+	donors = set()
+	acceptors = set()
+	for feat in feats:
+		family = feat.GetFamily()
+		atoms = feat.GetAtomIds()
+		if family == "Donor":
+			donors.update(atoms)
+		elif family == "Acceptor":
+			acceptors.update(atoms)
+
+	if len(donors) == 0 or len(acceptors) == 0:
+		return len(donors), len(acceptors)
+
+	dmat = Chem.GetDistanceMatrix(mol)
+
+	stranded_donors = 0
+	for d in donors:
+		if not any(dmat[d, a] <= 3 for a in acceptors):
+			stranded_donors += 1
+
+	stranded_acceptors = 0
+	for a in acceptors:
+		if not any(dmat[a, d] <= 3 for d in donors):
+			stranded_acceptors += 1
+
+	return stranded_donors, stranded_acceptors
+
+
+def _ligand_feature_vector(smiles):
+	"""Ligand-only structural features for moieties and H-bond tendencies."""
+	mol = Chem.MolFromSmiles(smiles) if smiles else None
+	if mol is None:
+		return np.zeros(LIGAND_MORGAN_BITS + LIGAND_DESC_LEN, dtype=np.float32)
+
+	morgan = np.array(AllChem.GetMorganFingerprintAsBitVect(
+		mol,
+		radius=2,
+		nBits=LIGAND_MORGAN_BITS,
+		useFeatures=True
+	), dtype=np.float32)
+
+	num_hbd = float(Lipinski.NumHDonors(mol))
+	num_hba = float(Lipinski.NumHAcceptors(mol))
+	stranded_d, stranded_a = _count_stranded_hbond_sites(mol)
+
+	desc = np.array([
+		float(len([a for a in mol.GetAtoms() if a.GetAtomicNum() == 35])),  # bromine count
+		float(len([a for a in mol.GetAtoms() if a.GetAtomicNum() == 17])),  # chlorine count
+		float(len([a for a in mol.GetAtoms() if a.GetAtomicNum() == 53])),  # iodine count
+		float(rdMolDescriptors.CalcNumSaturatedRings(mol)),
+		float(rdMolDescriptors.CalcNumAromaticRings(mol)),
+		num_hbd,
+		num_hba,
+		float(stranded_d),
+		float(stranded_a),
+		float(rdMolDescriptors.CalcFractionCSP3(mol)),
+	], dtype=np.float32)
+
+	return np.concatenate((morgan, desc), axis=0)
+
+
+def _combine_ifp_and_ligand_features(ifp_json, smiles, ifp_length=LUNA_IFP_LENGTH):
+	ifp = _unpack_fp(ifp_json, fp_length=ifp_length)
+	lig = _ligand_feature_vector(smiles)
+	return np.concatenate((ifp, lig), axis=0)
 
 # no reason for these to be tasks really, they're synchronous
 def get_molecule_by_id(mol_id, return_grade = False, return_pred = False, party_id = -1):
@@ -123,7 +216,7 @@ def get_predictions(party_id, sort_by = "prediction"):
 	preds = Prediction.query.filter_by(hp_settings_id = party_id).order_by(*order).all()
 	return preds
 
-def _unpack_fp(ifp_json, fp_length = 4096):
+def _unpack_fp(ifp_json, fp_length = LUNA_IFP_LENGTH):
 	fp = np.zeros(fp_length)
 	for key in ifp_json:
 		fp[int(key)] = ifp_json[key]
@@ -132,7 +225,7 @@ def _unpack_fp(ifp_json, fp_length = 4096):
 def get_num_grades(party_id):
 	return Grade.query.filter_by(hp_settings_id = party_id).count()
 
-def get_grades_for_training(party_id, format_dataframe = True, fp_col = 'fp', label_col = 'label', fp_length = 4096):
+def get_grades_for_training(party_id, format_dataframe = True, fp_col = 'fp', label_col = 'label', fp_length = LUNA_IFP_LENGTH):
 	"""
 	Gets all the grades for a run, formats into expected dataframe for FingerprintDataset if requested
 	"""
@@ -140,7 +233,14 @@ def get_grades_for_training(party_id, format_dataframe = True, fp_col = 'fp', la
 	grades = Grade.query.filter_by(hp_settings_id = party_id).all()
 
 	if format_dataframe:
-		data = [(int(grade.mol_id), _unpack_fp(json.loads(grade.ifp), fp_length), grade.grade) for grade in grades]
+		data = [
+			(
+				int(grade.mol_id),
+				_combine_ifp_and_ligand_features(json.loads(grade.ifp), grade.molecule.smi, fp_length),
+				grade.grade,
+			)
+			for grade in grades
+		]
 		df = pd.DataFrame(data, columns = ["id", fp_col, label_col])
 		df.set_index("id", inplace=True)
 		return df
@@ -150,9 +250,16 @@ def get_molecules_for_predicting(mol_ids, format_dataframe = True, fp_col = "fp"
 	molecules = Molecule.query.filter(Molecule.id.in_(mol_ids)).all()
 
 	if format_dataframe:
-		data = [(int(mol.id), _unpack_fp(mol.ifp.counts)) for mol in molecules if mol.ifp is not None] # filter out mols with no ifp if present
-		df = pd.DataFrame(data, columns = ["id", fp_col], index=mol_ids)
-		return df.dropna()
+		data = [
+			(
+				int(mol.id),
+				_combine_ifp_and_ligand_features(mol.ifp.counts, mol.smi),
+			)
+			for mol in molecules if mol.ifp is not None
+		] # filter out mols with no ifp if present
+		df = pd.DataFrame(data, columns = ["id", fp_col])
+		df.set_index("id", inplace=True)
+		return df.reindex(mol_ids).dropna()
 	return molecules
 
 # putting these here cause I dont know where else they fit

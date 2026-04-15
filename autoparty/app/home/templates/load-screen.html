@@ -146,7 +146,8 @@ function update_progress(status_url, nanobar, pb_div){
     if (data['finished']){
         pb_div.style.display = "none";
         if (data['failed']) {
-            alert("Calculations failed. Check the Celery worker output for the underlying error.")
+            var err_msg = data['error'] ? ("\n\n" + data['error']) : "";
+            alert("Calculations failed." + err_msg)
         } else {
             // we're done, delete task
             $.getJSON(status_url + "&delete_id=1", function(data){

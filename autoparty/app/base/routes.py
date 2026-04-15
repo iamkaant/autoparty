@@ -537,7 +537,19 @@ def taskstatus():
     elif screen_id: # molecule uploads, prediction  
         # for all tasks - are we done?
         result = celery.GroupResult.restore(screen_id)
+        if result is None:
+            return jsonify({"finished": True, "completed_count": 0, "total": 0, "failed": True,
+                            "error": "Task group could not be restored from the result backend."})
         tasks_failed = result.failed()
+
+        error_messages = []
+        if tasks_failed:
+            for task in result:
+                if task.failed():
+                    try:
+                        error_messages.append(str(task.result))
+                    except Exception:
+                        error_messages.append("A background task failed before returning error details.")
 
         total = 0; completed_count = 0
         for task in result:
@@ -552,7 +564,11 @@ def taskstatus():
         if delete_id:
             result.forget() # we're good to delete
         
-        return jsonify({"finished": all_finished, "completed_count":completed_count, "total": total, "failed": tasks_failed})
+        response = {"finished": all_finished, "completed_count":completed_count, "total": total, "failed": tasks_failed}
+        if error_messages:
+            response["error"] = error_messages[0]
+            response["errors"] = error_messages
+        return jsonify(response)
 
 @blueprint.route('/prep-results', methods = ['GET'])
 def prep_results():

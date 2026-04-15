@@ -46,7 +46,7 @@ def get_dataloaders(data, config_dict, fp_col = "fp", label_col = "label",
             indices = [np.random.choice(data.shape[0], size = data.shape[0]) for i in range(config_dict['method_dict']['committee_size'])]
         else:  # 
             shuffled_idx = np.random.choice(data.shape[0], size = data.shape[0], replace = False)
-            step = math.ciel(data.shape[0] / config_dict['method_dict']['committee_size'])
+            step = math.ceil(data.shape[0] / config_dict['method_dict']['committee_size'])
             indices = [shuffled_idx[i * step : (i+1) * step] for i in range(config_dict['method_dict']['committee_size'])]
     
         return [DataLoader(FingerprintDataset(data.iloc[ind], fp_col = fp_col, label_col = label_col, 
@@ -187,7 +187,8 @@ class BaseModel(ModelInterface):
         super().__init__()
         self.config_dict = config_dict
         # layers
-        self.layers = [4096] + [config_dict['n_neurons']] * config_dict['hidden_layers'] + [len(config_dict['output_options'])] 
+        input_size = int(config_dict.get('input_size', 4096))
+        self.layers = [input_size] + [config_dict['n_neurons']] * config_dict['hidden_layers'] + [len(config_dict['output_options'])] 
 
         layer_list = []
         for i in range(len(self.layers) - 1):
